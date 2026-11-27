@@ -1,0 +1,165 @@
+--- orig/Avatar/BodyAvatar.cs	2026-11-27 19:46:26.710042201 +0000
++++ Avatar/BodyAvatar.cs	2026-11-27 19:46:26.738553469 +0000
+@@ -46,6 +46,10 @@
+         const float HairCurveOutlineMix = 0.62f;
+ 
+         readonly Dictionary<string, LayerSlot> slots = new Dictionary<string, LayerSlot>(StringComparer.Ordinal);
++
++        // 场景里原本的层叠顺序（自下而上），「恢复默认」用。
++        List<string> defaultLayerOrder;
++        bool layerOrderCustomized;
+         readonly Dictionary<string, EquippedSlot> wearByLayer = new Dictionary<string, EquippedSlot>(StringComparer.Ordinal);
+         readonly Dictionary<string, List<EquippedSlot>> wearOrder = new Dictionary<string, List<EquippedSlot>>(StringComparer.OrdinalIgnoreCase);
+         readonly Dictionary<string, LayerSlot> backSlots = new Dictionary<string, LayerSlot>(StringComparer.OrdinalIgnoreCase);
+@@ -90,6 +94,11 @@
+         void Awake()
+         {
+             RebuildLayerCache();
++            if (defaultLayerOrder == null)
++            {
++                defaultLayerOrder = new List<string>();
++                GetLayerOrder(defaultLayerOrder);
++            }
+             if (GetComponent<BodyAvatarWearPop>() == null)
+                 gameObject.AddComponent<BodyAvatarWearPop>();
+         }
+@@ -115,6 +124,93 @@
+             }
+         }
+ 
++        public bool LayerOrderCustomized => layerOrderCustomized;
++
++        public bool HasLayer(string layerName)
++        {
++            return !string.IsNullOrEmpty(layerName) && slots.ContainsKey(layerName);
++        }
++
++        /// <summary>现在的层叠顺序：前件图层名，自下而上（Hierarchy 顺序）。_back 不列出。</summary>
++        public void GetLayerOrder(List<string> result)
++        {
++            if (result == null)
++                return;
++            result.Clear();
++            for (int i = 0; i < transform.childCount; i++)
++            {
++                string childName = transform.GetChild(i).name;
++                if (childName.EndsWith(BackSlotSuffix, StringComparison.OrdinalIgnoreCase))
++                    continue;
++                if (slots.ContainsKey(childName))
++                    result.Add(childName);
++            }
++        }
++
++        /// <summary>
++        /// 按 bottomToTop 重排图层。只动列表里的图层：它们在原本占着的层叠位置之间互换，
++        /// 不在列表里的图层（头发、饰品等）下标不变，所以会夹在原来的位置。
++        /// 双饰品的 _back 紧跟在自己的前件后面。
++        /// </summary>
++        public bool ApplyLayerOrder(IList<string> bottomToTop, bool notifySave = true, bool markCustom = true)
++        {
++            if (bottomToTop == null || bottomToTop.Count < 2)
++                return false;
++
++            var wanted = new List<LayerSlot>(bottomToTop.Count);
++            var seen = new HashSet<string>(StringComparer.Ordinal);
++            for (int i = 0; i < bottomToTop.Count; i++)
++            {
++                string name = bottomToTop[i];
++                if (string.IsNullOrEmpty(name) || !seen.Add(name))
++                    continue;
++                if (slots.TryGetValue(name, out LayerSlot slot) && slot != null
++                    && slot.Root != null && slot.Root.parent == transform)
++                    wanted.Add(slot);
++            }
++
++            if (wanted.Count < 2)
++                return false;
++
++            var positions = new List<int>(wanted.Count);
++            for (int i = 0; i < wanted.Count; i++)
++                positions.Add(wanted[i].Root.GetSiblingIndex());
++            positions.Sort();
++
++            var children = new List<Transform>(transform.childCount);
++            for (int i = 0; i < transform.childCount; i++)
++                children.Add(transform.GetChild(i));
++            for (int i = 0; i < wanted.Count; i++)
++                children[positions[i]] = wanted[i].Root;
++            for (int i = 0; i < children.Count; i++)
++                children[i].SetSiblingIndex(i);
++
++            // _back 放回自己前件的正后面
++            foreach (KeyValuePair<string, LayerSlot> pair in backSlots)
++            {
++                if (pair.Value == null || pair.Value.Root == null)
++                    continue;
++                if (slots.TryGetValue(pair.Key, out LayerSlot front) && front != null && front.Root != null)
++                    pair.Value.Root.SetSiblingIndex(front.Root.GetSiblingIndex());
++            }
++
++            if (markCustom)
++                layerOrderCustomized = true;
++            if (notifySave)
++                NoteOutfitIfNeeded();
++            return true;
++        }
++
++        /// <summary>恢复场景里原本的层叠顺序。</summary>
++        public void ResetLayerOrder(bool notifySave = true)
++        {
++            if (defaultLayerOrder != null)
++                ApplyLayerOrder(defaultLayerOrder, notifySave: false, markCustom: false);
++            layerOrderCustomized = false;
++            if (notifySave)
++                NoteOutfitIfNeeded();
++        }
++
+         /// <summary>返回该层用于调色的主填色 Image（S / S1，或旧单 Image）。</summary>
+         public bool TryGetLayer(string layerName, out Image image)
+         {
+@@ -891,6 +987,9 @@
+                 }
+             }
+ 
++            if (layerOrderCustomized)
++                GetLayerOrder(snapshot.layerOrder);
++
+             return snapshot;
+         }
+ 
+@@ -918,6 +1017,12 @@
+                 }
+             }
+ 
++            // 存档里有顺序就还原；没有（没调过，或旧存档）就回到默认，避免上一份的顺序串过来
++            if (snapshot.layerOrder != null && snapshot.layerOrder.Count > 1)
++                ApplyLayerOrder(snapshot.layerOrder, notifySave: false);
++            else if (layerOrderCustomized)
++                ResetLayerOrder(notifySave: false);
++
+             if (snapshot.layerColors == null)
+                 return;
+ 
+--- orig/Avatar/OutfitSnapshot.cs	2026-11-27 19:46:26.710087957 +0000
++++ Avatar/OutfitSnapshot.cs	2026-11-27 19:46:26.737867408 +0000
+@@ -47,5 +47,9 @@
+         public string characterId;
+         public List<EquippedSlot> slots = new List<EquippedSlot>();
+         public List<LayerColorEntry> layerColors = new List<LayerColorEntry>();
++
++        // 玩家在「图层顺序」页拖过之后才有内容（图层名，自下而上）。
++        // 空 = 没调过，沿用场景里的默认层叠。旧存档没有这个字段，读出来就是空。
++        public List<string> layerOrder = new List<string>();
+     }
+ }
+--- orig/Actions/PadHost.cs	2026-11-27 19:46:26.711392175 +0000
++++ Actions/PadHost.cs	2026-11-27 19:46:26.737705703 +0000
+@@ -11,7 +11,7 @@
+     /// </summary>
+     public class PadHost : MonoBehaviour
+     {
+-        static readonly string[] Pages = { "RandomSettings", "InputPad", "SaveMaleta" };
++        static readonly string[] Pages = { "RandomSettings", "InputPad", "SaveMaleta", LayerOrderPad.PageName };
+ 
+         GameObject dimmer;
+         bool prepared;
