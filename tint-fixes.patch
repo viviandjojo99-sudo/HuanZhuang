@@ -1,0 +1,95 @@
+diff -u -r --label a --label b a b
+--- a
++++ b
+@@ -1177,6 +1177,8 @@
+                 return;
+             TintStyle.SetMode(mode);
+             SyncTintDots();
++            // 模式只是存了起来，已选中的衣服要主动重画一次才会变。
++            UnityEngine.Object.FindAnyObjectByType<LayerColorController>()?.ReapplyToTarget();
+         }
+ 
+         void ToggleGradKind(int kind)
+diff -u -r --label a --label b a b
+--- a
++++ b
+@@ -356,6 +356,9 @@
+         void PaintSlot(LayerSlot slot, ClothingItem item, List<Sprite> fills, Color equipColor, float equipLift)
+         {
+             List<Sprite> outlines = item.CollectOutlineSprites();
++            // 换了新衣服：旧衣服留下的 B 色、渐变种类、缓存都不能带过来，
++            // 否则新增的图层部件会因为缓存相同而被跳过，没有渐变材质。
++            slot.ResetTintCache();
+             slot.EnsureParts(outlines.Count, fills.Count);
+             slot.ApplyOutlines(outlines, equipColor);
+             slot.ApplyFills(fills, equipColor);
+@@ -562,6 +565,7 @@
+                 return;
+             }
+ 
++            companionSlot.ResetTintCache();
+             companionSlot.EnsureParts(0, 1);
+             companionSlot.ApplyOutlines(null, Color.white);
+             Color companionColor = ColorForEquip(item);
+@@ -1460,7 +1464,7 @@
+                 SpriteBrighten.Set(image, 0f, TintStyle.Hue, TintStyle.GradNone, Color.white);
+             }
+ 
+-            void ResetTintCache()
++            public void ResetTintCache()
+             {
+                 lastFillColor = new Color(-1f, -1f, -1f, -1f);
+                 lastFillLift = -1f;
+diff -u -r --label a --label b a b
+--- a
++++ b
+@@ -195,13 +195,39 @@
+                     // 锁定时点另一件衣服，不能把已经锁定的起色改成这件的颜色。
+                     if (TintStyle.TwoColor && tintTarget != null
+                         && (RandomSettingsPanel.Current == null || !RandomSettingsPanel.Current.LockGradientActive))
+-                        TintStyle.SetGradientStart(tintTarget.color);
++                    {
++                        // 还停在「原色」时，只记下这件衣服的颜色，不能解除原色状态，
++                        // 否则只是点选衣服，A 就被改成白色，渐变直接消失。
++                        if (TintStyle.GradientAtOriginal)
++                        {
++                            if (HasVisibleColor(tintTarget.color))
++                                TintStyle.RememberOriginalColor(tintTarget.color);
++                        }
++                        else
++                        {
++                            TintStyle.SetGradientStart(tintTarget.color);
++                        }
++                    }
+                 }
+             }
+ 
+             RefreshGradientChips();
+         }
+ 
++        /// <summary>
++        /// 切换曲线/色相后，把选中衣服当前的颜色再走一遍和滑条相同的通道，
++        /// 让这件衣服按新模式重画。没上色、或渐变还停在原色时不动。
++        /// </summary>
++        public void ReapplyToTarget()
++        {
++            if (tintTarget == null || TintStyle.GradientAtOriginal)
++                return;
++            if (!HasVisibleColor(tintTarget.color))
++                return;
++            SpriteBrighten.Set(tintTarget, 0f);
++            PlayerTintApplied?.Invoke(tintTarget.color, 0f);
++        }
++
+         public void ClearTintTarget()
+         {
+             tintTarget = null;
+@@ -486,7 +512,7 @@
+             if (hueScrollbar != null)
+                 hueScrollbar.SetValueWithoutNotify(h);
+             if (saturationScrollbar != null)
+-                saturationScrollbar.SetValueWithoutNotify(Mathf.Max(s, 0.08f));
++                saturationScrollbar.SetValueWithoutNotify(s < 0.08f ? defaultSaturation : s);
+             if (valueScrollbar != null)
+                 valueScrollbar.SetValueWithoutNotify(ValueSliderFrom(color));
+ 
